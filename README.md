@@ -19,7 +19,10 @@ an issue and the implementation is guaranteed to keep evolving.
 
 ## Quickstart
 
-1. Add `polysqueeze` to your `Cargo.toml` and enable `tokio` in your runtime.
+1. Add `polysqueeze` to your deps:
+```bash
+cargo add polysqueeze
+```
 
 2. Create a client, derive API keys, and post a sample order. This is the one path
    that currently runs against the live API (single-order placement); batch order

@@ -1,5 +1,5 @@
 //! Polysqueeze is a Rust SDK for interacting with Polymarket's REST, Gamma, and
-//! WebSocket APIs without any market-making opinion baked in.
+//! WebSocket APIs.
 //! Use it to authenticate, build signed orders, stream live book data, or query
 //! historical fills and markets.
 
