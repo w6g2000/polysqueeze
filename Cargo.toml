@@ -2,6 +2,14 @@
 name = "polysqueeze"
 version = "0.1.0"
 edition = "2024"
+description = "Rust SDK for authenticated access to Polymarket's CLOB, Gamma, and WebSocket APIs."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+homepage = "https://github.com/augustin-v/polysqueeze"
+repository = "https://github.com/augustin-v/polysqueeze"
+keywords = ["polymarket", "prediction-markets", "websocket", "rust", "clob"]
+categories = ["network-programming", "finance", "data-structures"]
+documentation = "https://docs.rs/polysqueeze"
 
 [dependencies]
 async-trait = "0.1.71"
