@@ -1570,6 +1570,10 @@ impl ClobClient {
         };
         query.push(("end_date_max", end_date_max.to_rfc3339()));
 
+        if let Some(start_date_min) = params.and_then(|options| options.start_date_min.clone()) {
+            query.push(("start_date_min", start_date_min.to_rfc3339()));
+        }
+
         if let Some(options) = params {
             if let Some(closed) = options.closed {
                 query.push(("closed", closed.to_string()));

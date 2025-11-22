@@ -1177,6 +1177,7 @@ pub struct GammaListParams {
     pub ascending: Option<bool>,
     pub liquidity_num_min: Option<Decimal>,
     pub end_date_max: Option<DateTime<Utc>>,
+    pub start_date_min: Option<DateTime<Utc>>,
 }
 
 impl GammaListParams {
@@ -1215,6 +1216,9 @@ impl GammaListParams {
         }
         if let Some(end_date_max) = &self.end_date_max {
             params.push(("end_date_max", end_date_max.to_rfc3339()));
+        }
+        if let Some(start_date_min) = &self.start_date_min {
+            params.push(("start_date_min", start_date_min.to_rfc3339()));
         }
         params
     }
