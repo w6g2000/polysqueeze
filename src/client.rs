@@ -25,6 +25,7 @@ use std::str::FromStr;
 const DEFAULT_GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
 const DEFAULT_WS_BASE: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/";
 const DEFAULT_RTDS_BASE: &str = "wss://ws-live-data.polymarket.com";
+const DEFAULT_DATA_API_BASE: &str = "https://data-api.polymarket.com";
 const GAMMA_MARKETS_LIMIT: u32 = 50;
 
 // Re-export types for compatibility
@@ -58,6 +59,103 @@ impl Default for OrderArgs {
             size: Decimal::ZERO,
             side: Side::BUY,
         }
+    }
+}
+
+/// Client for Polymarket's public data API.
+///
+/// This client is intentionally light-weight and only serves the
+/// public `/value` and `/positions` endpoints, which do not require
+/// authentication.
+#[derive(Debug, Clone)]
+pub struct DataApiClient {
+    http_client: Client,
+    base_url: String,
+}
+
+impl DataApiClient {
+    /// Create a data API client using the default base URL.
+    pub fn new() -> Self {
+        Self {
+            http_client: Client::new(),
+            base_url: DEFAULT_DATA_API_BASE.to_string(),
+        }
+    }
+
+    /// Override the base URL (useful for testing or staging).
+    pub fn with_base_url(mut self, url: &str) -> Self {
+        self.base_url = url.to_string();
+        self
+    }
+
+    fn data_api_url(&self, path: &str) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        let path = path.trim_start_matches('/');
+        if path.is_empty() {
+            base.to_string()
+        } else {
+            format!("{}/{}", base, path)
+        }
+    }
+
+    /// Fetch the total positions value for a single user wallet.
+    ///
+    /// Returns the same structure as the `GET /value` public endpoint.
+    pub async fn get_total_positions_value(
+        &self,
+        user: &str,
+    ) -> Result<Vec<crate::types::DataPositionValue>> {
+        let response = self
+            .http_client
+            .get(self.data_api_url("value"))
+            .query(&[("user", user)])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(PolyError::api(
+                response.status().as_u16(),
+                "Failed to fetch total positions value",
+            ));
+        }
+
+        response
+            .json::<Vec<crate::types::DataPositionValue>>()
+            .await
+            .map_err(|e| PolyError::parse(format!("Failed to parse response: {}", e), None))
+    }
+
+    /// Retrieve the current open positions for a wallet.
+    ///
+    /// This wraps the `GET /positions` endpoint and automatically applies
+    /// sane defaults when the optional `params` argument is omitted.
+    pub async fn get_positions(
+        &self,
+        user: &str,
+        params: Option<crate::types::DataApiPositionsParams>,
+    ) -> Result<Vec<crate::types::DataPosition>> {
+        let params = params.unwrap_or_default();
+        let mut query = params.to_query_params();
+        query.push(("user", user.to_string()));
+
+        let response = self
+            .http_client
+            .get(self.data_api_url("positions"))
+            .query(&query)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(PolyError::api(
+                response.status().as_u16(),
+                "Failed to fetch positions",
+            ));
+        }
+
+        response
+            .json::<Vec<crate::types::DataPosition>>()
+            .await
+            .map_err(|e| PolyError::parse(format!("Failed to parse response: {}", e), None))
     }
 }
 
@@ -753,7 +851,7 @@ impl ClobClient {
     /// Post multiple orders in a single batch request
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// let orders = vec![order1, order2, order3];
     /// let results = client.post_orders(orders, OrderType::GTC).await?;
     /// ```
@@ -1894,6 +1992,7 @@ pub use crate::types::{
     ExtraOrderArgs, GammaEvent, GammaListParams, Market, MarketOrderArgs, MarketsResponse,
     MidpointResponse, NegRiskResponse, OrderBookSummary, OrderSummary, PriceResponse, Rewards,
     Sport, SpreadResponse, Tag, TickSizeResponse, Token,
+    DataApiPositionsParams, DataApiSortBy, DataApiSortDirection, DataPosition, DataPositionValue,
 };
 
 // Compatibility types that need to stay in client.rs

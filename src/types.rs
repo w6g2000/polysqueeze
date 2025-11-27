@@ -1225,6 +1225,149 @@ impl GammaListParams {
     }
 }
 
+/// Parameters supported by the Data API `/positions` endpoint.
+#[derive(Debug, Clone, Default)]
+pub struct DataApiPositionsParams {
+    /// Minimum position size to include in the response.
+    pub size_threshold: Option<u32>,
+    /// Maximum number of rows to return.
+    pub limit: Option<u32>,
+    /// Field to sort by.
+    pub sort_by: Option<DataApiSortBy>,
+    /// Direction to sort (`ASC` or `DESC`).
+    pub sort_direction: Option<DataApiSortDirection>,
+}
+
+impl DataApiPositionsParams {
+    pub fn to_query_params(&self) -> Vec<(&'static str, String)> {
+        let size_threshold = self.size_threshold.unwrap_or(1);
+        let limit = self.limit.unwrap_or(100);
+        let sort_by = self.sort_by.unwrap_or_default();
+        let sort_direction = self.sort_direction.unwrap_or_default();
+
+        vec![
+            ("sizeThreshold", size_threshold.to_string()),
+            ("limit", limit.to_string()),
+            ("sortBy", sort_by.as_str().to_string()),
+            ("sortDirection", sort_direction.as_str().to_string()),
+        ]
+    }
+}
+
+/// Fields allowed for sorting the `/positions` response.
+#[derive(Debug, Clone, Copy)]
+pub enum DataApiSortBy {
+    Current,
+    Initial,
+    Tokens,
+    CashPnl,
+    PercentPnl,
+    Title,
+    Resolving,
+    Price,
+    AvgPrice,
+}
+
+impl DataApiSortBy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DataApiSortBy::Current => "CURRENT",
+            DataApiSortBy::Initial => "INITIAL",
+            DataApiSortBy::Tokens => "TOKENS",
+            DataApiSortBy::CashPnl => "CASHPNL",
+            DataApiSortBy::PercentPnl => "PERCENTPNL",
+            DataApiSortBy::Title => "TITLE",
+            DataApiSortBy::Resolving => "RESOLVING",
+            DataApiSortBy::Price => "PRICE",
+            DataApiSortBy::AvgPrice => "AVGPRICE",
+        }
+    }
+}
+
+impl Default for DataApiSortBy {
+    fn default() -> Self {
+        DataApiSortBy::Tokens
+    }
+}
+
+/// Sort direction for the Data API `/positions` response.
+#[derive(Debug, Clone, Copy)]
+pub enum DataApiSortDirection {
+    Asc,
+    Desc,
+}
+
+impl DataApiSortDirection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DataApiSortDirection::Asc => "ASC",
+            DataApiSortDirection::Desc => "DESC",
+        }
+    }
+}
+
+impl Default for DataApiSortDirection {
+    fn default() -> Self {
+        DataApiSortDirection::Desc
+    }
+}
+
+/// A single row from the `/positions` endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataPosition {
+    #[serde(rename = "proxyWallet")]
+    pub proxy_wallet: String,
+    pub asset: String,
+    #[serde(rename = "conditionId")]
+    pub condition_id: String,
+    pub size: Decimal,
+    #[serde(rename = "avgPrice")]
+    pub avg_price: Decimal,
+    #[serde(rename = "initialValue")]
+    pub initial_value: Decimal,
+    #[serde(rename = "currentValue")]
+    pub current_value: Decimal,
+    #[serde(rename = "cashPnl")]
+    pub cash_pnl: Decimal,
+    #[serde(rename = "percentPnl")]
+    pub percent_pnl: Decimal,
+    #[serde(rename = "totalBought")]
+    pub total_bought: Decimal,
+    #[serde(rename = "realizedPnl")]
+    pub realized_pnl: Decimal,
+    #[serde(rename = "percentRealizedPnl")]
+    pub percent_realized_pnl: Decimal,
+    #[serde(rename = "curPrice")]
+    pub cur_price: Decimal,
+    pub redeemable: bool,
+    pub mergeable: bool,
+    pub title: Option<String>,
+    pub slug: Option<String>,
+    pub icon: Option<String>,
+    #[serde(rename = "eventId")]
+    pub event_id: Option<String>,
+    #[serde(rename = "eventSlug")]
+    pub event_slug: Option<String>,
+    pub outcome: Option<String>,
+    #[serde(rename = "outcomeIndex")]
+    pub outcome_index: Option<u32>,
+    #[serde(rename = "oppositeOutcome")]
+    pub opposite_outcome: Option<String>,
+    #[serde(rename = "oppositeAsset")]
+    pub opposite_asset: Option<String>,
+    #[serde(rename = "endDate")]
+    pub end_date: Option<String>,
+    #[serde(rename = "negativeRisk")]
+    pub negative_risk: Option<bool>,
+}
+
+/// Response returned by the `/value` endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataPositionValue {
+    pub user: String,
+    pub value: Decimal,
+}
+
 /// Gamma API event metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GammaEvent {
