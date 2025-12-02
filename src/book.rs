@@ -74,6 +74,67 @@ pub struct OrderBook {
 }
 
 impl OrderBook {
+    /// Replace the entire order book with a snapshot from a WSS MarketBook event.
+    ///
+    /// This clears existing bids/asks and rebuilds the book using the snapshot's aggregated levels.
+    /// Tick size configuration (if any) is preserved from the existing book.
+    pub fn apply_snapshot(&mut self, snapshot: &crate::wss::MarketBook) -> Result<()> {
+        use chrono::{TimeZone, Utc};
+
+        let timestamp_ms = snapshot
+            .timestamp
+            .parse::<i64>()
+            .map_err(|e| PolyError::parse(format!("Invalid snapshot timestamp: {}", e), None))?;
+        let timestamp = Utc
+            .timestamp_millis_opt(timestamp_ms)
+            .single()
+            .ok_or_else(|| PolyError::parse("Invalid snapshot timestamp", None))?;
+
+        self.bids.clear();
+        self.asks.clear();
+
+        for level in &snapshot.bids {
+            if level.size.is_zero() {
+                continue;
+            }
+            let price_ticks = decimal_to_price(level.price).map_err(|_| {
+                PolyError::validation(format!(
+                    "Failed to convert bid price {} to ticks",
+                    level.price
+                ))
+            })?;
+            let size_units = decimal_to_qty(level.size).map_err(|_| {
+                PolyError::validation(format!(
+                    "Failed to convert bid size {} to units",
+                    level.size
+                ))
+            })?;
+            self.bids.insert(price_ticks, size_units);
+        }
+
+        for level in &snapshot.asks {
+            if level.size.is_zero() {
+                continue;
+            }
+            let price_ticks = decimal_to_price(level.price).map_err(|_| {
+                PolyError::validation(format!(
+                    "Failed to convert ask price {} to ticks",
+                    level.price
+                ))
+            })?;
+            let size_units = decimal_to_qty(level.size).map_err(|_| {
+                PolyError::validation(format!(
+                    "Failed to convert ask size {} to units",
+                    level.size
+                ))
+            })?;
+            self.asks.insert(price_ticks, size_units);
+        }
+
+        self.timestamp = timestamp;
+
+        Ok(())
+    }
     /// Create a new order book
     /// Just sets up empty bid/ask maps and basic metadata
     pub fn new(token_id: String, max_depth: usize) -> Self {
