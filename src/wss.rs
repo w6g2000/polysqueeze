@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::time::{sleep, timeout};
+use tokio::time::{interval, sleep, MissedTickBehavior};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
@@ -27,7 +27,7 @@ const USER_CHANNEL_PATH: &str = "/ws/user";
 const BASE_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(10);
 const MAX_RECONNECT_ATTEMPTS: u32 = 8;
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Represents a parsed market broadcast from the public market channel.
 #[derive(Debug, Clone)]
@@ -323,57 +323,67 @@ impl WssMarketClient {
     /// Read the next market channel event, reconnecting transparently when
     /// the socket drops.
     pub async fn next_event(&mut self) -> Result<WssMarketEvent> {
+        let mut ping_interval = interval(KEEPALIVE_INTERVAL);
+        ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         loop {
             if let Some(evt) = self.pending_events.pop_front() {
                 return Ok(evt);
             }
             self.ensure_connection().await?;
 
-            match self.connection.as_mut().unwrap().next().await {
-                Some(Ok(Message::Text(text))) => {
-                    let trimmed = text.trim();
-                    if trimmed.eq_ignore_ascii_case("ping") || trimmed.eq_ignore_ascii_case("pong")
-                    {
-                        continue;
-                    }
-                    let first_char = trimmed.chars().next();
-                    if first_char != Some('{') && first_char != Some('[') {
-                        warn!("ignoring unexpected text frame: {}", trimmed);
-                        continue;
-                    }
-                    let events = parse_market_events(&text)?;
-                    self.stats.messages_received += events.len() as u64;
-                    self.stats.last_message_time = Some(Utc::now());
-                    for evt in events {
-                        self.pending_events.push_back(evt);
-                    }
-                    if let Some(evt) = self.pending_events.pop_front() {
-                        return Ok(evt);
-                    }
-                    continue;
-                }
-                Some(Ok(Message::Ping(payload))) => {
+            tokio::select! {
+                biased;
+                _ = ping_interval.tick() => {
                     if let Some(connection) = self.connection.as_mut() {
-                        let _ = connection.send(Message::Pong(payload)).await;
+                        let _ = connection.send(Message::Text("PING".into())).await;
                     }
                 }
-                Some(Ok(Message::Pong(_))) => {}
-                Some(Ok(Message::Close(_))) => {
-                    self.disconnect_history.push_back(Utc::now());
-                    if self.disconnect_history.len() > 5 {
-                        self.disconnect_history.pop_front();
+                maybe_msg = self.connection.as_mut().unwrap().next() => {
+                    match maybe_msg {
+                        Some(Ok(Message::Text(text))) => {
+                            let trimmed = text.trim();
+                            if trimmed.eq_ignore_ascii_case("ping") || trimmed.eq_ignore_ascii_case("pong") {
+                                continue;
+                            }
+                            let first_char = trimmed.chars().next();
+                            if first_char != Some('{') && first_char != Some('[') {
+                                warn!("ignoring unexpected text frame: {}", trimmed);
+                                continue;
+                            }
+                            let events = parse_market_events(&text)?;
+                            self.stats.messages_received += events.len() as u64;
+                            self.stats.last_message_time = Some(Utc::now());
+                            for evt in events {
+                                self.pending_events.push_back(evt);
+                            }
+                            if let Some(evt) = self.pending_events.pop_front() {
+                                return Ok(evt);
+                            }
+                        }
+                        Some(Ok(Message::Ping(payload))) => {
+                            if let Some(connection) = self.connection.as_mut() {
+                                let _ = connection.send(Message::Pong(payload)).await;
+                            }
+                        }
+                        Some(Ok(Message::Pong(_))) => {}
+                        Some(Ok(Message::Close(_))) => {
+                            self.disconnect_history.push_back(Utc::now());
+                            if self.disconnect_history.len() > 5 {
+                                self.disconnect_history.pop_front();
+                            }
+                            self.connection = None;
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(err)) => {
+                            warn!("WebSocket error: {}", err);
+                            self.connection = None;
+                            self.stats.errors += 1;
+                        }
+                        None => {
+                            self.connection = None;
+                        }
                     }
-                    self.connection = None;
-                }
-                Some(Ok(_)) => {}
-                Some(Err(err)) => {
-                    warn!("WebSocket error: {}", err);
-                    self.connection = None;
-                    self.stats.errors += 1;
-                    continue;
-                }
-                None => {
-                    self.connection = None;
                 }
             }
         }
@@ -517,61 +527,66 @@ impl WssUserClient {
     /// Read the next user channel event, reconnecting transparently when the
     /// socket drops.
     pub async fn next_event(&mut self) -> Result<WssUserEvent> {
+        let mut ping_interval = interval(KEEPALIVE_INTERVAL);
+        ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         loop {
             if let Some(evt) = self.pending_events.pop_front() {
                 return Ok(evt);
             }
             self.ensure_connection().await?;
 
-            match timeout(KEEPALIVE_INTERVAL, self.connection.as_mut().unwrap().next()).await {
-                Ok(Some(Ok(Message::Text(text)))) => {
-                    let trimmed = text.trim();
-                    if trimmed.eq_ignore_ascii_case("ping") || trimmed.eq_ignore_ascii_case("pong")
-                    {
-                        continue;
-                    }
-                    let first_char = trimmed.chars().next();
-                    if first_char != Some('{') && first_char != Some('[') {
-                        warn!("ignoring unexpected text frame: {}", trimmed);
-                        continue;
-                    }
-                    let events = parse_user_events(&text)?;
-                    self.stats.messages_received += events.len() as u64;
-                    self.stats.last_message_time = Some(Utc::now());
-                    for evt in events {
-                        self.pending_events.push_back(evt);
-                    }
-                    if let Some(evt) = self.pending_events.pop_front() {
-                        return Ok(evt);
-                    }
-                    continue;
-                }
-                Ok(Some(Ok(Message::Ping(payload)))) => {
-                    if let Some(connection) = self.connection.as_mut() {
-                        let _ = connection.send(Message::Pong(payload)).await;
-                    }
-                }
-                Ok(Some(Ok(Message::Pong(_)))) => {}
-                Ok(Some(Ok(Message::Close(_)))) => {
-                    self.disconnect_history.push_back(Utc::now());
-                    if self.disconnect_history.len() > 5 {
-                        self.disconnect_history.pop_front();
-                    }
-                    self.connection = None;
-                }
-                Ok(Some(Ok(_))) => {}
-                Ok(Some(Err(err))) => {
-                    warn!("WebSocket error: {}", err);
-                    self.connection = None;
-                    self.stats.errors += 1;
-                    continue;
-                }
-                Ok(None) => {
-                    self.connection = None;
-                }
-                Err(_) => {
+            tokio::select! {
+                biased;
+                _ = ping_interval.tick() => {
                     if let Some(connection) = self.connection.as_mut() {
                         let _ = connection.send(Message::Text("PING".into())).await;
+                    }
+                }
+                maybe_msg = self.connection.as_mut().unwrap().next() => {
+                    match maybe_msg {
+                        Some(Ok(Message::Text(text))) => {
+                            let trimmed = text.trim();
+                            if trimmed.eq_ignore_ascii_case("ping") || trimmed.eq_ignore_ascii_case("pong") {
+                                continue;
+                            }
+                            let first_char = trimmed.chars().next();
+                            if first_char != Some('{') && first_char != Some('[') {
+                                warn!("ignoring unexpected text frame: {}", trimmed);
+                                continue;
+                            }
+                            let events = parse_user_events(&text)?;
+                            self.stats.messages_received += events.len() as u64;
+                            self.stats.last_message_time = Some(Utc::now());
+                            for evt in events {
+                                self.pending_events.push_back(evt);
+                            }
+                            if let Some(evt) = self.pending_events.pop_front() {
+                                return Ok(evt);
+                            }
+                        }
+                        Some(Ok(Message::Ping(payload))) => {
+                            if let Some(connection) = self.connection.as_mut() {
+                                let _ = connection.send(Message::Pong(payload)).await;
+                            }
+                        }
+                        Some(Ok(Message::Pong(_))) => {}
+                        Some(Ok(Message::Close(_))) => {
+                            self.disconnect_history.push_back(Utc::now());
+                            if self.disconnect_history.len() > 5 {
+                                self.disconnect_history.pop_front();
+                            }
+                            self.connection = None;
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(err)) => {
+                            warn!("WebSocket error: {}", err);
+                            self.connection = None;
+                            self.stats.errors += 1;
+                        }
+                        None => {
+                            self.connection = None;
+                        }
                     }
                 }
             }
