@@ -7,7 +7,7 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::BTreeMap; // BTreeMap keeps prices sorted automatically - crucial for order books
 use std::sync::{Arc, RwLock}; // For thread-safe access across multiple tasks
-use tracing::{debug, trace, warn}; // Logging for debugging and monitoring
+use tracing::{debug, warn}; // Logging for debugging and monitoring
 
 /// High-performance order book implementation
 ///
@@ -27,10 +27,6 @@ pub struct OrderBook {
 
     /// Hash of token_id for fast lookups (avoids string comparisons in hot path)
     pub token_id_hash: u64,
-
-    /// Current sequence number for ordering updates
-    /// This helps us ignore old/duplicate updates that arrive out of order
-    pub sequence: u64,
 
     /// Last update timestamp - when we last got new data for this book
     pub timestamp: chrono::DateTime<Utc>,
@@ -150,7 +146,6 @@ impl OrderBook {
         Self {
             token_id,
             token_id_hash,
-            sequence: 0, // Start at 0, will increment as we get updates
             timestamp: Utc::now(),
             bids: BTreeMap::new(), // Empty to start - using Price/Qty types
             asks: BTreeMap::new(), // Empty to start - using Price/Qty types
@@ -368,7 +363,6 @@ impl OrderBook {
             timestamp: self.timestamp,
             bids: self.bids(None), // Get all bids (up to max_depth)
             asks: self.asks(None), // Get all asks (up to max_depth)
-            sequence: self.sequence,
         }
     }
 
@@ -397,16 +391,6 @@ impl OrderBook {
     /// - Integer comparisons instead of Decimal comparisons
     /// - No memory allocations for price/size operations
     pub fn apply_delta_fast(&mut self, delta: FastOrderDelta) -> Result<()> {
-        // Validate sequence ordering - ignore old updates that arrive late
-        // This is crucial for maintaining data integrity in real-time systems
-        if delta.sequence <= self.sequence {
-            trace!(
-                "Ignoring stale delta: {} <= {}",
-                delta.sequence, self.sequence
-            );
-            return Ok(());
-        }
-
         // Validate token ID hash matches (fast string comparison avoidance)
         if delta.token_id_hash != self.token_id_hash {
             return Err(PolyError::validation("Token ID mismatch"));
@@ -433,7 +417,6 @@ impl OrderBook {
         }
 
         // Update our tracking info
-        self.sequence = delta.sequence;
         self.timestamp = delta.timestamp;
 
         // Apply the actual change to the appropriate side (FAST VERSION)
@@ -446,11 +429,10 @@ impl OrderBook {
         self.trim_depth();
 
         debug!(
-            "Applied fast delta: {} {} @ {} ticks (seq: {})",
+            "Applied fast delta: {} {} @ {} ticks",
             delta.side.as_str(),
             delta.size,
             delta.price,
-            delta.sequence
         );
 
         Ok(())
@@ -903,11 +885,9 @@ mod tests {
             side: Side::BUY,
             price: dec!(0.5),
             size: dec!(100),
-            sequence: 1,
         };
 
         book.apply_delta(delta).unwrap();
-        assert_eq!(book.sequence, 1); // Sequence should update
         assert_eq!(book.best_bid().unwrap().price, dec!(0.5)); // Should be our bid
         assert_eq!(book.best_bid().unwrap().size, dec!(100)); // Should be our size
     }
@@ -924,7 +904,6 @@ mod tests {
             side: Side::BUY,
             price: dec!(0.5),
             size: dec!(100),
-            sequence: 1,
         })
         .unwrap();
 
@@ -935,7 +914,6 @@ mod tests {
             side: Side::SELL,
             price: dec!(0.52),
             size: dec!(100),
-            sequence: 2,
         })
         .unwrap();
 
@@ -950,14 +928,13 @@ mod tests {
 
         // Add multiple ask levels (people selling at different prices)
         // $0.50 for 100 tokens, $0.51 for 100 tokens, $0.52 for 100 tokens
-        for (i, price) in [dec!(0.50), dec!(0.51), dec!(0.52)].iter().enumerate() {
+        for price in [dec!(0.50), dec!(0.51), dec!(0.52)].iter() {
             book.apply_delta(OrderDelta {
                 token_id: "test_token".to_string(),
                 timestamp: Utc::now(),
                 side: Side::SELL,
                 price: *price,
                 size: dec!(100),
-                sequence: i as u64 + 1,
             })
             .unwrap();
         }

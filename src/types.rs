@@ -331,8 +331,6 @@ pub struct OrderBook {
     pub bids: Vec<BookLevel>,
     /// Ask orders
     pub asks: Vec<BookLevel>,
-    /// Sequence number
-    pub sequence: u64,
 }
 
 /// Order book delta for streaming updates - EXTERNAL API VERSION
@@ -346,7 +344,6 @@ pub struct OrderDelta {
     pub side: Side,
     pub price: Decimal,
     pub size: Decimal, // 0 means remove level
-    pub sequence: u64,
 }
 
 /// Order book delta for streaming updates - INTERNAL HOT PATH VERSION
@@ -366,7 +363,6 @@ pub struct FastOrderDelta {
     pub side: Side,
     pub price: Price, // Price in ticks
     pub size: Qty,    // Size in fixed-point units (0 means remove level)
-    pub sequence: u64,
 }
 
 impl FastOrderDelta {
@@ -406,7 +402,6 @@ impl FastOrderDelta {
             side: delta.side,
             price,
             size,
-            sequence: delta.sequence,
         })
     }
 
@@ -419,7 +414,6 @@ impl FastOrderDelta {
             side: self.side,
             price: price_to_decimal(self.price),
             size: qty_to_decimal(self.size),
-            sequence: self.sequence,
         }
     }
 
@@ -1113,7 +1107,7 @@ pub struct BookParams {
     pub side: Side,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OrderBookSummary {
     pub market: String,
     pub asset_id: String,
@@ -1124,7 +1118,7 @@ pub struct OrderBookSummary {
     pub asks: Vec<OrderSummary>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OrderSummary {
     #[serde(with = "rust_decimal::serde::str")]
     pub price: Decimal,

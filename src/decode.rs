@@ -225,7 +225,6 @@ impl Decoder<OrderBook> for RawOrderBookResponse {
             timestamp,
             bids,
             asks,
-            sequence: 0, // TODO: Get from response if available
         })
     }
 }

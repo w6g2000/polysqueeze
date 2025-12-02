@@ -548,7 +548,6 @@ mod tests {
                 side: Side::BUY,
                 price: rust_decimal_macros::dec!(0.5),
                 size: rust_decimal_macros::dec!(100),
-                sequence: 1,
             },
         });
 
