@@ -23,10 +23,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub enum SigType {
     /// ECDSA EIP712 signatures signed by EOAs
     Eoa = 0,
-    /// EIP712 signatures signed by EOAs that own Polymarket Proxy wallets
-    PolyProxy = 1,
+    /// Email/Magic wallet signatures (Py/TS signature_type = 1)
+    EmailOrMagic = 1,
+    /// EIP712 signatures signed by EOAs that own Polymarket Proxy wallets (BrowserWalletProxy)
+    PolyProxy = 2,
     /// EIP712 signatures signed by EOAs that own Polymarket Gnosis safes
-    PolyGnosisSafe = 2,
+    PolyGnosisSafe = 3,
 }
 
 /// Rounding configuration for different tick sizes
