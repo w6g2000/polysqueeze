@@ -162,7 +162,6 @@ pub struct TickSizeChangeMessage {
     pub old_tick_size: rust_decimal::Decimal,
     #[serde(rename = "new_tick_size", with = "rust_decimal::serde::str")]
     pub new_tick_size: rust_decimal::Decimal,
-    pub side: String,
     pub timestamp: String,
 }
 
