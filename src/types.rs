@@ -903,9 +903,9 @@ impl OpenOrderParams {
 #[derive(Debug, Clone)]
 pub struct TradeParams {
     pub id: Option<String>,
-    pub maker_address: Option<String>,
+    pub taker: Option<String>,
+    pub maker: Option<String>,
     pub market: Option<String>,
-    pub asset_id: Option<String>,
     pub before: Option<u64>,
     pub after: Option<u64>,
 }
@@ -918,16 +918,16 @@ impl TradeParams {
             params.push(("id", x.clone()));
         }
 
-        if let Some(x) = &self.asset_id {
-            params.push(("asset_id", x.clone()));
+        if let Some(x) = &self.taker {
+            params.push(("taker", x.clone()));
+        }
+
+        if let Some(x) = &self.maker {
+            params.push(("maker", x.clone()));
         }
 
         if let Some(x) = &self.market {
             params.push(("market", x.clone()));
-        }
-
-        if let Some(x) = &self.maker_address {
-            params.push(("maker_address", x.clone()));
         }
 
         if let Some(x) = &self.before {
@@ -966,6 +966,65 @@ pub struct OpenOrder {
     pub order_type: OrderType,
     #[serde(deserialize_with = "crate::decode::deserializers::number_from_string")]
     pub created_at: u64,
+}
+
+/// Response wrapper for a single open order lookup
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetOrderResponse {
+    #[serde(alias = "data")]
+    pub order: Option<OpenOrder>,
+}
+
+/// Maker order component inside a trade fill
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MakerOrder {
+    #[serde(rename = "order_id")]
+    pub order_id: String,
+    pub maker_address: String,
+    pub owner: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub matched_amount: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub fee_rate_bps: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub price: Decimal,
+    pub asset_id: String,
+    pub outcome: String,
+    pub side: String,
+}
+
+/// Trade information for the authenticated user
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Trade {
+    pub id: String,
+    pub taker_order_id: String,
+    pub market: String,
+    pub asset_id: String,
+    pub side: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub size: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub fee_rate_bps: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub price: Decimal,
+    pub status: String,
+    #[serde(deserialize_with = "crate::decode::deserializers::number_from_string")]
+    pub match_time: u64,
+    #[serde(deserialize_with = "crate::decode::deserializers::number_from_string")]
+    pub last_update: u64,
+    pub outcome: String,
+    pub maker_address: String,
+    pub owner: String,
+    pub transaction_hash: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::decode::deserializers::optional_number_from_string"
+    )]
+    pub bucket_index: Option<u64>,
+    #[serde(default)]
+    pub maker_orders: Vec<MakerOrder>,
+    #[serde(default, rename = "type", alias = "trader_side")]
+    pub trade_type: Option<String>,
 }
 
 /// Balance allowance information

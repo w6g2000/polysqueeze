@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::time::{interval, sleep, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval, sleep};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };

@@ -1064,19 +1064,17 @@ impl ClobClient {
 
     /// Get trade history with optional filtering
     ///
-    /// This retrieves historical trades for the authenticated user. You can filter by:
-    /// - Trade ID (exact match)
-    /// - Maker address (trades where you were the maker)
-    /// - Market ID (trades in a specific market)
-    /// - Asset/Token ID (trades for a specific token)
-    /// - Time range (before/after timestamps)
-    ///
-    /// Trades are returned in reverse chronological order (newest first).
+    /// Filters supported:
+    /// - `id`: exact trade ID
+    /// - `taker`: taker address
+    /// - `maker`: maker address
+    /// - `market`: condition ID
+    /// - `before` / `after`: unix timestamps bounding the query
     pub async fn get_trades(
         &self,
         trade_params: Option<&crate::types::TradeParams>,
         next_cursor: Option<&str>,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<Vec<crate::types::Trade>> {
         let signer = self
             .signer
             .as_ref()
@@ -1096,39 +1094,60 @@ impl ClobClient {
             Some(p) => p.to_query_params(),
         };
 
-        let mut next_cursor = next_cursor.unwrap_or("MA==").to_string(); // INITIAL_CURSOR
         let mut output = Vec::new();
 
-        while next_cursor != "LTE=" {
-            // END_CURSOR
-            let req = self
+        let mut cursor = next_cursor.map(|c| c.to_string());
+
+        loop {
+            let mut req = self
                 .http_client
                 .request(method.clone(), self.clob_url(endpoint))
-                .query(&query_params)
-                .query(&[("next_cursor", &next_cursor)]);
+                .query(&query_params);
+
+            if let Some(c) = &cursor {
+                req = req.query(&[("next_cursor", c)]);
+            }
 
             let r = headers
                 .clone()
                 .into_iter()
                 .fold(req, |r, (k, v)| r.header(HeaderName::from_static(k), v));
 
-            let resp = r
+            let raw = r
                 .send()
                 .await
                 .map_err(|e| PolyError::network(format!("Request failed: {}", e), e))?
-                .json::<Value>()
+                .text()
                 .await
-                .map_err(|e| PolyError::parse(format!("Failed to parse response: {}", e), None))?;
+                .map_err(|e| PolyError::parse(format!("Failed to read response: {}", e), None))?;
 
-            let new_cursor = resp["next_cursor"]
-                .as_str()
-                .ok_or_else(|| PolyError::parse("Failed to parse next cursor".to_string(), None))?
-                .to_owned();
+            let resp_val: Value = serde_json::from_str(&raw).map_err(|e| {
+                PolyError::parse(
+                    format!("Failed to parse response JSON: {}; body: {}", e, raw),
+                    None,
+                )
+            })?;
 
-            next_cursor = new_cursor;
+            let trades_value = resp_val
+                .get("data")
+                .cloned()
+                .unwrap_or_else(|| resp_val.clone());
 
-            let results = resp["data"].clone();
-            output.push(results);
+            let trades =
+                serde_json::from_value::<Vec<crate::types::Trade>>(trades_value).map_err(|e| {
+                    PolyError::parse(
+                        format!("Failed to parse trades: {}; body: {}", e, raw),
+                        None,
+                    )
+                })?;
+            output.extend(trades);
+
+            match resp_val.get("next_cursor").and_then(|c| c.as_str()) {
+                Some(c) if c != "LTE=" => {
+                    cursor = Some(c.to_string());
+                }
+                _ => break,
+            }
         }
 
         Ok(output)
@@ -1357,27 +1376,51 @@ impl ClobClient {
             .ok_or_else(|| PolyError::config("API credentials not configured"))?;
 
         let method = Method::GET;
-        let endpoint = &format!("/data/order/{}", order_id);
+        let endpoint = format!("/data/order/{}", order_id);
         let headers =
-            create_l2_headers::<Value>(signer, api_creds, method.as_str(), endpoint, None)?;
+            create_l2_headers::<Value>(signer, api_creds, method.as_str(), &endpoint, None)?;
 
-        let response = self
-            .http_client
-            .request(method, self.clob_url(endpoint))
-            .headers(
-                headers
-                    .into_iter()
-                    .map(|(k, v)| (HeaderName::from_static(k), v.parse().unwrap()))
-                    .collect(),
-            )
+        let req = self.create_request_with_headers(method, &endpoint, headers.into_iter());
+        let response = req
             .send()
             .await
             .map_err(|e| PolyError::network(format!("Request failed: {}", e), e))?;
 
-        response
-            .json::<crate::types::OpenOrder>()
+        if !response.status().is_success() {
+            return Err(PolyError::api(
+                response.status().as_u16(),
+                format!(
+                    "Failed to fetch order: {}",
+                    response.text().await.unwrap_or_default()
+                ),
+            ));
+        }
+
+        let text = response
+            .text()
             .await
-            .map_err(|e| PolyError::parse(format!("Failed to parse response: {}", e), None))
+            .map_err(|e| PolyError::parse(format!("Failed to read response: {}", e), None))?;
+
+        // Try parsing in multiple shapes: {order:{...}}, {data:{...}}, or bare OpenOrder.
+        let as_value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            PolyError::parse(
+                format!("Failed to parse response JSON: {}; body: {}", e, text),
+                None,
+            )
+        })?;
+
+        let order_value = as_value
+            .get("order")
+            .or_else(|| as_value.get("data"))
+            .cloned()
+            .unwrap_or_else(|| as_value.clone());
+
+        serde_json::from_value::<crate::types::OpenOrder>(order_value).map_err(|e| {
+            PolyError::parse(
+                format!("Failed to parse order payload: {}; body: {}", e, text),
+                None,
+            )
+        })
     }
 
     /// Get last trade price for a token
