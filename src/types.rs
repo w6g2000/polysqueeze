@@ -560,6 +560,40 @@ impl PostOrder {
     }
 }
 
+/// Response after posting an order
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostOrderResponse {
+    #[serde(default)]
+    pub success: bool,
+    #[serde(default, rename = "errorMsg", alias = "error", alias = "error_msg")]
+    pub error_msg: String,
+    #[serde(default, rename = "orderId", alias = "orderID")]
+    pub order_id: Option<String>,
+    #[serde(
+        default,
+        rename = "orderHashes",
+        alias = "order_hashes",
+        alias = "transactionsHashes",
+        alias = "transactions_hashes"
+    )]
+    pub order_hashes: Vec<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default, rename = "makingAmount", alias = "making_amount")]
+    pub making_amount: Option<String>,
+    #[serde(default, rename = "takingAmount", alias = "taking_amount")]
+    pub taking_amount: Option<String>,
+}
+
+/// Response for cancel-related endpoints
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CancelOrdersResponse {
+    #[serde(default)]
+    pub canceled: Vec<String>,
+    #[serde(default, rename = "not_canceled", alias = "notCanceled")]
+    pub not_canceled: std::collections::HashMap<String, serde_json::Value>,
+}
+
 /// Market information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Market {

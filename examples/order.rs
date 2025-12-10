@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     let signed_order = client.create_order(&args, None, None, None).await?;
 
     let response = client.post_order(signed_order, OrderType::GTC).await?;
-    println!("order posted: {}", response);
+    println!("order posted: {:?}", response);
 
     Ok(())
 }

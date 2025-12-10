@@ -67,7 +67,7 @@ async fn place_order_smoke() -> Result<()> {
     println!("order payload: {}", serde_json::to_string(&post_body)?);
 
     let response = client.post_order(signed_order, OrderType::GTC).await?;
-    println!("post_order response: {}", response);
+    println!("post_order response: {:?}", response);
 
     Ok(())
 }

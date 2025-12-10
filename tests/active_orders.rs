@@ -51,7 +51,7 @@ async fn get_active_orders_live() -> Result<()> {
     // No filters: fetch active orders for the authenticated user
     let orders = client.get_active_orders(None).await?;
     println!("active orders fetched: {}", orders.len());
-    println!("{:#?}",orders);
+    println!("{:#?}", orders);
 
     Ok(())
 }

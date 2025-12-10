@@ -106,12 +106,11 @@ async fn main() -> Result<()> {
         .await?;
     let response = l2_client.post_order(signed_order, OrderType::GTC).await?;
     let order_id = response
-        .get("orderID")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| PolyError::validation("Post order response missing orderID"))?
-        .to_string();
+        .order_id
+        .clone()
+        .ok_or_else(|| PolyError::validation("Post order response missing order_id"))?;
     println!(
-        "Placed order on {} @ {}: {response:#}",
+        "Placed order on {} @ {}: {response:#?}",
         token_id, order_price
     );
     println!(

@@ -814,7 +814,7 @@ impl ClobClient {
         &self,
         order: SignedOrderRequest,
         order_type: OrderType,
-    ) -> Result<Value> {
+    ) -> Result<crate::types::PostOrderResponse> {
         let signer = self
             .signer
             .as_ref()
@@ -838,14 +838,34 @@ impl ClobClient {
         let req = self.create_request_with_headers(Method::POST, "/order", headers.into_iter());
 
         let response = req.json(&body).send().await?;
-        if !response.status().is_success() {
+        let status = response.status();
+        let raw = response
+            .text()
+            .await
+            .map_err(|e| PolyError::parse(format!("Failed to read response: {}", e), None))?;
+
+        if !status.is_success() {
             return Err(PolyError::api(
-                response.status().as_u16(),
-                format!("Failed to post order {}", response.text().await.unwrap()),
+                status.as_u16(),
+                format!("Failed to post order {}", raw),
             ));
         }
 
-        Ok(response.json::<Value>().await?)
+        let parsed: crate::types::PostOrderResponse = serde_json::from_str(&raw).map_err(|e| {
+            PolyError::parse(
+                format!("Failed to parse post order response: {}; body: {}", e, raw),
+                None,
+            )
+        })?;
+
+        if !parsed.success {
+            return Err(PolyError::api(
+                status.as_u16(),
+                format!("Order placement failed: {}", parsed.error_msg),
+            ));
+        }
+
+        Ok(parsed)
     }
 
     /// Post multiple orders in a single batch request
@@ -859,7 +879,7 @@ impl ClobClient {
         &self,
         orders: Vec<SignedOrderRequest>,
         order_type: OrderType,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<Vec<crate::types::PostOrderResponse>> {
         let signer = self
             .signer
             .as_ref()
@@ -888,27 +908,51 @@ impl ClobClient {
         let req = self.create_request_with_headers(Method::POST, "/orders", headers.into_iter());
 
         let response = req.json(&batch).send().await?;
-        if !response.status().is_success() {
+        let status = response.status();
+        let raw = response
+            .text()
+            .await
+            .map_err(|e| PolyError::parse(format!("Failed to read response: {}", e), None))?;
+
+        if !status.is_success() {
             return Err(PolyError::api(
-                response.status().as_u16(),
-                format!(
-                    "Failed to post batch orders: {}",
-                    response.text().await.unwrap()
-                ),
+                status.as_u16(),
+                format!("Failed to post batch orders: {}", raw),
             ));
         }
 
-        Ok(response.json::<Vec<Value>>().await?)
+        let parsed: Vec<crate::types::PostOrderResponse> =
+            serde_json::from_str(&raw).map_err(|e| {
+                PolyError::parse(
+                    format!(
+                        "Failed to parse batch post order response: {}; body: {}",
+                        e, raw
+                    ),
+                    None,
+                )
+            })?;
+
+        if let Some(failed) = parsed.iter().find(|r| !r.success) {
+            return Err(PolyError::api(
+                status.as_u16(),
+                format!("Failed to post one or more orders: {}", failed.error_msg),
+            ));
+        }
+
+        Ok(parsed)
     }
 
     /// Create and post an order in one call
-    pub async fn create_and_post_order(&self, order_args: &OrderArgs) -> Result<Value> {
+    pub async fn create_and_post_order(
+        &self,
+        order_args: &OrderArgs,
+    ) -> Result<crate::types::PostOrderResponse> {
         let order = self.create_order(order_args, None, None, None).await?;
         self.post_order(order, OrderType::GTC).await
     }
 
     /// Cancel an order
-    pub async fn cancel(&self, order_id: &str) -> Result<Value> {
+    pub async fn cancel(&self, order_id: &str) -> Result<crate::types::CancelOrdersResponse> {
         let signer = self
             .signer
             .as_ref()
@@ -924,18 +968,32 @@ impl ClobClient {
         let req = self.create_request_with_headers(Method::DELETE, "/order", headers.into_iter());
 
         let response = req.json(&body).send().await?;
-        if !response.status().is_success() {
+        let status = response.status();
+        let raw = response
+            .text()
+            .await
+            .map_err(|e| PolyError::parse(format!("Failed to read response: {}", e), None))?;
+
+        if !status.is_success() {
             return Err(PolyError::api(
-                response.status().as_u16(),
-                "Failed to cancel order",
+                status.as_u16(),
+                format!("Failed to cancel order: {}", raw),
             ));
         }
 
-        Ok(response.json::<Value>().await?)
+        serde_json::from_str::<crate::types::CancelOrdersResponse>(&raw).map_err(|e| {
+            PolyError::parse(
+                format!("Failed to parse cancel response: {}; body: {}", e, raw),
+                None,
+            )
+        })
     }
 
     /// Cancel multiple orders
-    pub async fn cancel_orders(&self, order_ids: &[String]) -> Result<Value> {
+    pub async fn cancel_orders(
+        &self,
+        order_ids: &[String],
+    ) -> Result<crate::types::CancelOrdersResponse> {
         let signer = self
             .signer
             .as_ref()
@@ -949,18 +1007,32 @@ impl ClobClient {
         let req = self.create_request_with_headers(Method::DELETE, "/orders", headers.into_iter());
 
         let response = req.json(order_ids).send().await?;
-        if !response.status().is_success() {
+        let status = response.status();
+        let raw = response
+            .text()
+            .await
+            .map_err(|e| PolyError::parse(format!("Failed to read response: {}", e), None))?;
+
+        if !status.is_success() {
             return Err(PolyError::api(
-                response.status().as_u16(),
-                "Failed to cancel orders",
+                status.as_u16(),
+                format!("Failed to cancel orders: {}", raw),
             ));
         }
 
-        Ok(response.json::<Value>().await?)
+        serde_json::from_str::<crate::types::CancelOrdersResponse>(&raw).map_err(|e| {
+            PolyError::parse(
+                format!(
+                    "Failed to parse cancel orders response: {}; body: {}",
+                    e, raw
+                ),
+                None,
+            )
+        })
     }
 
     /// Cancel all orders
-    pub async fn cancel_all(&self) -> Result<Value> {
+    pub async fn cancel_all(&self) -> Result<crate::types::CancelOrdersResponse> {
         let signer = self
             .signer
             .as_ref()
@@ -975,14 +1047,25 @@ impl ClobClient {
             self.create_request_with_headers(Method::DELETE, "/cancel-all", headers.into_iter());
 
         let response = req.send().await?;
-        if !response.status().is_success() {
+        let status = response.status();
+        let raw = response
+            .text()
+            .await
+            .map_err(|e| PolyError::parse(format!("Failed to read response: {}", e), None))?;
+
+        if !status.is_success() {
             return Err(PolyError::api(
-                response.status().as_u16(),
-                "Failed to cancel all orders",
+                status.as_u16(),
+                format!("Failed to cancel all orders: {}", raw),
             ));
         }
 
-        Ok(response.json::<Value>().await?)
+        serde_json::from_str::<crate::types::CancelOrdersResponse>(&raw).map_err(|e| {
+            PolyError::parse(
+                format!("Failed to parse cancel-all response: {}; body: {}", e, raw),
+                None,
+            )
+        })
     }
 
     /// Get open orders with optional filtering
@@ -1588,7 +1671,7 @@ impl ClobClient {
         &self,
         market: Option<&str>,
         asset_id: Option<&str>,
-    ) -> Result<Value> {
+    ) -> Result<crate::types::CancelOrdersResponse> {
         let signer = self
             .signer
             .as_ref()
@@ -1621,10 +1704,28 @@ impl ClobClient {
             .await
             .map_err(|e| PolyError::network(format!("Request failed: {}", e), e))?;
 
-        response
-            .json::<Value>()
+        let status = response.status();
+        let raw = response
+            .text()
             .await
-            .map_err(|e| PolyError::parse(format!("Failed to parse response: {}", e), None))
+            .map_err(|e| PolyError::parse(format!("Failed to read response: {}", e), None))?;
+
+        if !status.is_success() {
+            return Err(PolyError::api(
+                status.as_u16(),
+                format!("Failed to cancel market orders: {}", raw),
+            ));
+        }
+
+        serde_json::from_str::<crate::types::CancelOrdersResponse>(&raw).map_err(|e| {
+            PolyError::parse(
+                format!(
+                    "Failed to parse cancel market orders response: {}; body: {}",
+                    e, raw
+                ),
+                None,
+            )
+        })
     }
 
     /// Drop (delete) notifications by IDs
@@ -2185,7 +2286,7 @@ pub trait MarketClient: Send + Sync {
         &self,
         market: Option<&str>,
         asset_id: Option<&str>,
-    ) -> Result<serde_json::Value>;
+    ) -> Result<crate::types::CancelOrdersResponse>;
     async fn create_order(
         &self,
         order_args: &OrderArgs,
@@ -2197,7 +2298,7 @@ pub trait MarketClient: Send + Sync {
         &self,
         order: SignedOrderRequest,
         order_type: OrderType,
-    ) -> Result<serde_json::Value>;
+    ) -> Result<crate::types::PostOrderResponse>;
 }
 
 #[async_trait]
@@ -2225,7 +2326,7 @@ impl MarketClient for ClobClient {
         &self,
         market: Option<&str>,
         asset_id: Option<&str>,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<crate::types::CancelOrdersResponse> {
         ClobClient::cancel_market_orders(self, market, asset_id).await
     }
 
@@ -2243,7 +2344,7 @@ impl MarketClient for ClobClient {
         &self,
         order: SignedOrderRequest,
         order_type: OrderType,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<crate::types::PostOrderResponse> {
         ClobClient::post_order(self, order, order_type).await
     }
 }
