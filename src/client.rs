@@ -14,7 +14,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
 use chrono::{Duration, Utc};
 use reqwest::Client;
 use reqwest::header::HeaderName;
-use reqwest::{Method, RequestBuilder};
+use reqwest::{Method, RequestBuilder, StatusCode};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 use serde::de::DeserializeOwned;
@@ -1062,6 +1062,73 @@ impl ClobClient {
         Ok(output)
     }
 
+    /// Get active orders (single page) with optional filters
+    ///
+    /// Calls `/data/orders` once without pagination to fetch active orders filtered by
+    /// order id, asset id, or market id.
+    pub async fn get_active_orders(
+        &self,
+        params: Option<&crate::types::OpenOrderParams>,
+    ) -> Result<Vec<crate::types::OpenOrder>> {
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or_else(|| PolyError::config("Signer not configured"))?;
+        let api_creds = self
+            .api_creds
+            .as_ref()
+            .ok_or_else(|| PolyError::config("API credentials not configured"))?;
+
+        let method = Method::GET;
+        let endpoint = "/data/orders";
+        let headers =
+            create_l2_headers::<Value>(signer, api_creds, method.as_str(), endpoint, None)?;
+
+        let query_params = match params {
+            None => Vec::new(),
+            Some(p) => p.to_query_params(),
+        };
+
+        let mut req = self
+            .http_client
+            .request(method.clone(), self.clob_url(endpoint));
+
+        if !query_params.is_empty() {
+            req = req.query(&query_params);
+        }
+
+        let req = headers
+            .into_iter()
+            .fold(req, |r, (k, v)| r.header(HeaderName::from_static(k), v));
+
+        let raw = req
+            .send()
+            .await
+            .map_err(|e| PolyError::network(format!("Request failed: {}", e), e))?
+            .text()
+            .await
+            .map_err(|e| PolyError::parse(format!("Failed to read response: {}", e), None))?;
+
+        let as_value: Value = serde_json::from_str(&raw).map_err(|e| {
+            PolyError::parse(
+                format!("Failed to parse response JSON: {}; body: {}", e, raw),
+                None,
+            )
+        })?;
+
+        let orders_value = as_value
+            .get("data")
+            .cloned()
+            .unwrap_or_else(|| as_value.clone());
+
+        serde_json::from_value::<Vec<crate::types::OpenOrder>>(orders_value).map_err(|e| {
+            PolyError::parse(
+                format!("Failed to parse active orders: {}; body: {}", e, raw),
+                None,
+            )
+        })
+    }
+
     /// Get trade history with optional filtering
     ///
     /// Filters supported:
@@ -1364,8 +1431,8 @@ impl ClobClient {
             .map_err(|e| PolyError::parse(format!("Failed to parse response: {}", e), None))
     }
 
-    /// Get single order by ID
-    pub async fn get_order(&self, order_id: &str) -> Result<crate::types::OpenOrder> {
+    /// Get single order by ID (or fetch latest order when ID is omitted)
+    pub async fn get_order(&self, order_hash: Option<&str>) -> Result<crate::types::OpenOrder> {
         let signer = self
             .signer
             .as_ref()
@@ -1376,7 +1443,19 @@ impl ClobClient {
             .ok_or_else(|| PolyError::config("API credentials not configured"))?;
 
         let method = Method::GET;
-        let endpoint = format!("/data/order/{}", order_id);
+        let base_endpoint = "/data/order";
+        let order_hash_clean = order_hash.and_then(|hash| {
+            let trimmed = hash.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        let endpoint = match order_hash_clean {
+            Some(id) => format!("{}/{}", base_endpoint, id),
+            None => base_endpoint.to_string(),
+        };
         let headers =
             create_l2_headers::<Value>(signer, api_creds, method.as_str(), &endpoint, None)?;
 
@@ -1386,34 +1465,74 @@ impl ClobClient {
             .await
             .map_err(|e| PolyError::network(format!("Request failed: {}", e), e))?;
 
-        if !response.status().is_success() {
-            return Err(PolyError::api(
-                response.status().as_u16(),
-                format!(
-                    "Failed to fetch order: {}",
-                    response.text().await.unwrap_or_default()
-                ),
-            ));
-        }
-
+        let status = response.status();
+        let url = response.url().to_string();
         let text = response
             .text()
             .await
             .map_err(|e| PolyError::parse(format!("Failed to read response: {}", e), None))?;
 
-        // Try parsing in multiple shapes: {order:{...}}, {data:{...}}, or bare OpenOrder.
-        let as_value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        if !status.is_success() {
+            if status == StatusCode::NOT_FOUND {
+                return Err(PolyError::order(
+                    format!(
+                        "Order {} not found at {}: {}",
+                        order_hash_clean.unwrap_or("<unspecified>"),
+                        url,
+                        text
+                    ),
+                    crate::errors::OrderErrorKind::OrderNotFound,
+                ));
+            }
+
+            return Err(PolyError::api(
+                status.as_u16(),
+                format!("Failed to fetch order at {}: {}", url, text),
+            ));
+        }
+
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed == "null" {
+            return Err(PolyError::order(
+                format!(
+                    "Order {} not found",
+                    order_hash_clean.unwrap_or("<unspecified>")
+                ),
+                crate::errors::OrderErrorKind::OrderNotFound,
+            ));
+        }
+
+        // Try parsing in multiple shapes: {order:{...}}, {data:{...}}, {data:{order:{...}}},
+        // or a bare OpenOrder payload.
+        let as_value: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
             PolyError::parse(
                 format!("Failed to parse response JSON: {}; body: {}", e, text),
                 None,
             )
         })?;
 
-        let order_value = as_value
-            .get("order")
-            .or_else(|| as_value.get("data"))
-            .cloned()
-            .unwrap_or_else(|| as_value.clone());
+        let order_value = if let Some(order) = as_value.get("order") {
+            order.clone()
+        } else if let Some(data) = as_value.get("data") {
+            match data {
+                serde_json::Value::Object(map) => {
+                    map.get("order").cloned().unwrap_or_else(|| data.clone())
+                }
+                _ => data.clone(),
+            }
+        } else {
+            as_value.clone()
+        };
+
+        if order_value.is_null() {
+            return Err(PolyError::order(
+                format!(
+                    "Order {} not found",
+                    order_hash_clean.unwrap_or("<unspecified>")
+                ),
+                crate::errors::OrderErrorKind::OrderNotFound,
+            ));
+        }
 
         serde_json::from_value::<crate::types::OpenOrder>(order_value).map_err(|e| {
             PolyError::parse(
@@ -2132,6 +2251,7 @@ impl MarketClient for ClobClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::OrderErrorKind;
     use crate::types::*;
     use mockito::{Matcher, Server};
     use rust_decimal::Decimal;
@@ -2147,6 +2267,22 @@ mod tests {
             base_url,
             "0x1234567890123456789012345678901234567890123456789012345678901234",
             137,
+        )
+        .with_gamma_base(base_url)
+    }
+
+    fn create_test_client_with_l2_auth(base_url: &str) -> ClobClient {
+        let api_creds = ApiCredentials {
+            api_key: "test_key".to_string(),
+            secret: "test_secret".to_string(),
+            passphrase: "test_passphrase".to_string(),
+        };
+
+        ClobClient::with_l2_headers(
+            base_url,
+            "0x1234567890123456789012345678901234567890123456789012345678901234",
+            137,
+            api_creds,
         )
         .with_gamma_base(base_url)
     }
@@ -2331,6 +2467,123 @@ mod tests {
         assert_eq!(book.market, "0x123");
         assert_eq!(book.bids.len(), 1);
         assert_eq!(book.asks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_order_handles_wrapped_payload() {
+        let mut server = Server::new_async().await;
+        let order_id = "order-123";
+        let endpoint = format!("/data/order/{}", order_id);
+        let mock_response = serde_json::json!({
+            "data": {
+                "order": {
+                    "associate_trades": [],
+                    "id": order_id,
+                    "status": "LIVE",
+                    "market": "0xmarket",
+                    "original_size": "10.0",
+                    "outcome": "Yes",
+                    "maker_address": "0xmaker",
+                    "owner": "0xowner",
+                    "price": "0.55",
+                    "side": "BUY",
+                    "size_matched": "0.0",
+                    "asset_id": "0xasset",
+                    "expiration": "1700000000",
+                    "type": "GTC",
+                    "created_at": "1700000001"
+                }
+            }
+        })
+        .to_string();
+
+        let mock = server
+            .mock("GET", endpoint.as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_response)
+            .create_async()
+            .await;
+
+        let client = create_test_client_with_l2_auth(&server.url());
+        let result = client.get_order(Some(order_id)).await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+        let order = result.unwrap();
+        assert_eq!(order.id, order_id);
+        assert_eq!(order.order_type, OrderType::GTC);
+        assert_eq!(order.price, Decimal::from_str("0.55").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_get_order_handles_null_payload() {
+        let mut server = Server::new_async().await;
+        let order_id = "missing";
+        let endpoint = format!("/data/order/{}", order_id);
+
+        let mock = server
+            .mock("GET", endpoint.as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("null")
+            .create_async()
+            .await;
+
+        let client = create_test_client_with_l2_auth(&server.url());
+        let result = client.get_order(Some(order_id)).await;
+
+        mock.assert_async().await;
+        assert!(matches!(
+            result,
+            Err(PolyError::Order {
+                kind: OrderErrorKind::OrderNotFound,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_get_order_without_id_uses_base_endpoint() {
+        let mut server = Server::new_async().await;
+        let endpoint = "/data/order";
+        let mock_response = serde_json::json!({
+            "order": {
+                "associate_trades": [],
+                "id": "order-no-id",
+                "status": "LIVE",
+                "market": "0xmarket",
+                "original_size": "5.0",
+                "outcome": "Yes",
+                "maker_address": "0xmaker",
+                "owner": "0xowner",
+                "price": "0.42",
+                "side": "SELL",
+                "size_matched": "1.0",
+                "asset_id": "0xasset",
+                "expiration": "1700000000",
+                "type": "GTC",
+                "created_at": "1700000001"
+            }
+        })
+        .to_string();
+
+        let mock = server
+            .mock("GET", endpoint)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_response)
+            .create_async()
+            .await;
+
+        let client = create_test_client_with_l2_auth(&server.url());
+        let result = client.get_order(None).await;
+
+        mock.assert_async().await;
+        let order = result.unwrap();
+        assert_eq!(order.id, "order-no-id");
+        assert_eq!(order.order_type, OrderType::GTC);
+        assert_eq!(order.price, Decimal::from_str("0.42").unwrap());
     }
 
     #[tokio::test]

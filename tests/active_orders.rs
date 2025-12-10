@@ -5,16 +5,16 @@ fn env_or_skip(key: &str) -> Option<String> {
     match env::var(key) {
         Ok(v) => Some(v),
         Err(_) => {
-            eprintln!("Skipping get_order_live_smoke (set {key})");
+            eprintln!("Skipping get_active_orders_live (set {key})");
             None
         }
     }
 }
 
 #[tokio::test]
-async fn get_order_live_smoke() -> Result<()> {
-    if env::var("RUN_GET_ORDER_TEST").is_err() {
-        eprintln!("Skipping get_order_live_smoke (set RUN_GET_ORDER_TEST=1)");
+async fn get_active_orders_live() -> Result<()> {
+    if env::var("RUN_ACTIVE_ORDERS_TEST").is_err() {
+        eprintln!("Skipping get_active_orders_live (set RUN_ACTIVE_ORDERS_TEST=1)");
         return Ok(());
     }
 
@@ -36,10 +36,6 @@ async fn get_order_live_smoke() -> Result<()> {
         Some(v) => v,
         None => return Ok(()),
     };
-    let order_id = env::var("POLY_ORDER_ID").unwrap_or_default();
-    if order_id.is_empty() {
-        eprintln!("POLY_ORDER_ID not set, sending request with empty id");
-    }
     let chain_id = env::var("POLY_CHAIN_ID")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -52,29 +48,10 @@ async fn get_order_live_smoke() -> Result<()> {
     };
     let client = ClobClient::with_l2_headers(&base_url, &private_key, chain_id, api_creds);
 
-    let order_id_opt = if order_id.is_empty() {
-        None
-    } else {
-        Some(order_id.as_str())
-    };
-
-    let order_result = client.get_order(order_id_opt).await;
-
-    if order_id.is_empty() {
-        match order_result {
-            Ok(order) => {
-                println!("order (empty id): {:#?}", order);
-            }
-            Err(err) => {
-                eprintln!("Empty POLY_ORDER_ID request returned error: {}", err);
-            }
-        }
-        return Ok(());
-    }
-
-    let order = order_result?;
-    println!("order: {:#?}", order);
-    assert_eq!(order.id, order_id);
+    // No filters: fetch active orders for the authenticated user
+    let orders = client.get_active_orders(None).await?;
+    println!("active orders fetched: {}", orders.len());
+    println!("{:#?}",orders);
 
     Ok(())
 }
