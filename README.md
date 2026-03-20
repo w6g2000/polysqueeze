@@ -13,6 +13,8 @@ an issue and the implementation is guaranteed to keep evolving.
 - Order creation flows have live regression coverage for the single-order path;
   batch/multi-order flows still need more testing and contributions are welcome.
 - Gamma data types for markets, tokens, order books, rewards, etc.
+- Typed market-channel WebSocket helpers for `book`, `price_change`, `tick_size_change`,
+  `last_trade_price`, `best_bid_ask`, `new_market`, and `market_resolved`.
 - Configuration helpers for Polygon mainnet + testnet (testing has only been done on mainnet), plus shared utils for signing,
   math, and fills.
 
@@ -64,8 +66,11 @@ async fn main() -> polysqueeze::Result<()> {
 }
 ```
 
-3. Explore `ws::WebSocketStream` (WIP TODO)  for real-time
-   updates, or use `book::OrderBookCache` for a cached view of the order book.
+3. Use `wss::{WssMarketClient, WssUserClient}` for real-time updates. The market
+   client now sends the official Polymarket market-channel subscription payload
+   with `custom_feature_enabled: true`, supports dynamic `subscribe` /
+   `unsubscribe` deltas on an existing connection, and parses the full public
+   market event set documented by Polymarket.
 
 ## Example
 
@@ -91,8 +96,9 @@ condition/asset IDs you care about, then run:
 cargo run --example wss_market
 ```
 
-The example prints `book`, `price_change`, `tick_size_change`, and
-`last_trade_price` events for the subscribed markets.
+The example prints `book`, `price_change`, `tick_size_change`,
+`last_trade_price`, `best_bid_ask`, `new_market`, and `market_resolved`
+events for the subscribed markets.
 
 For authenticated events, `examples/wss_user.rs` shows how to derive an API key,
 construct `WssUserClient`, and stream `WssUserEvent::Order`/`Trade` messages.

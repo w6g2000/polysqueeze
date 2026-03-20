@@ -74,6 +74,24 @@ async fn main() -> Result<()> {
                     trade.market, trade.side, trade.price
                 );
             }
+            Ok(WssMarketEvent::BestBidAsk(update)) => {
+                println!(
+                    "best_bid_ask {} bid={} ask={} spread={}",
+                    update.market, update.best_bid, update.best_ask, update.spread
+                );
+            }
+            Ok(WssMarketEvent::NewMarket(market)) => {
+                println!(
+                    "new_market {} slug={} assets={:?}",
+                    market.market, market.slug, market.assets_ids
+                );
+            }
+            Ok(WssMarketEvent::MarketResolved(market)) => {
+                println!(
+                    "market_resolved {} winner={} ({})",
+                    market.market, market.winning_asset_id, market.winning_outcome
+                );
+            }
             Err(err) => {
                 eprintln!("stream error: {}", err);
                 break;

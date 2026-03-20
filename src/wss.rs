@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::{MissedTickBehavior, interval, sleep};
@@ -36,6 +36,9 @@ pub enum WssMarketEvent {
     PriceChange(PriceChangeMessage),
     TickSizeChange(TickSizeChangeMessage),
     LastTrade(LastTradeMessage),
+    BestBidAsk(BestBidAskMessage),
+    NewMarket(NewMarketMessage),
+    MarketResolved(MarketResolvedMessage),
 }
 
 /// Events emitted by the authenticated user channel.
@@ -181,6 +184,91 @@ pub struct LastTradeMessage {
     pub timestamp: String,
 }
 
+/// Best bid/ask updates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BestBidAskMessage {
+    #[serde(rename = "event_type")]
+    pub event_type: String,
+    pub market: String,
+    pub asset_id: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub best_bid: rust_decimal::Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub best_ask: rust_decimal::Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub spread: rust_decimal::Decimal,
+    pub timestamp: String,
+}
+
+/// Event metadata nested inside market lifecycle messages.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MarketLifecycleEventMessage {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub ticker: String,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// New market lifecycle notifications.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NewMarketMessage {
+    #[serde(rename = "event_type")]
+    pub event_type: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub market: String,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub assets_ids: Vec<String>,
+    #[serde(default)]
+    pub outcomes: Vec<String>,
+    #[serde(default)]
+    pub event_message: Option<MarketLifecycleEventMessage>,
+    #[serde(default)]
+    pub timestamp: String,
+}
+
+/// Market resolved lifecycle notifications.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MarketResolvedMessage {
+    #[serde(rename = "event_type")]
+    pub event_type: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub market: String,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub assets_ids: Vec<String>,
+    #[serde(default)]
+    pub outcomes: Vec<String>,
+    #[serde(default)]
+    pub winning_asset_id: String,
+    #[serde(default)]
+    pub winning_outcome: String,
+    #[serde(default)]
+    pub event_message: Option<MarketLifecycleEventMessage>,
+    #[serde(default)]
+    pub timestamp: String,
+}
+
 /// Simple stats for monitoring connection health.
 #[derive(Debug, Clone, Default)]
 pub struct WssStats {
@@ -235,7 +323,22 @@ impl WssMarketClient {
         json!({
             "type": "market",
             "assets_ids": self.subscribed_asset_ids,
+            "custom_feature_enabled": true,
         })
+    }
+
+    fn format_subscription_operation(&self, operation: &str, asset_ids: Vec<String>) -> Value {
+        match operation {
+            "subscribe" => json!({
+                "assets_ids": asset_ids,
+                "operation": operation,
+                "custom_feature_enabled": true,
+            }),
+            _ => json!({
+                "assets_ids": asset_ids,
+                "operation": operation,
+            }),
+        }
     }
 
     async fn send_subscription(&mut self) -> Result<()> {
@@ -305,19 +408,43 @@ impl WssMarketClient {
         Duration::from_millis(millis.min(MAX_RECONNECT_DELAY.as_millis()) as u64)
     }
 
-    async fn ensure_connection(&mut self) -> Result<()> {
+    async fn ensure_connection(&mut self) -> Result<bool> {
         if self.connection.is_none() {
             self.connect().await?;
             self.send_subscription().await?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Subscribe to the market channel for the provided token/market IDs.
     pub async fn subscribe(&mut self, asset_ids: Vec<String>) -> Result<()> {
-        self.subscribed_asset_ids = asset_ids;
-        self.ensure_connection().await?;
-        self.send_subscription().await
+        let next_asset_ids = dedupe_preserve_order(asset_ids);
+        let previous_asset_ids = self.subscribed_asset_ids.clone();
+        self.subscribed_asset_ids = next_asset_ids.clone();
+
+        let connected = self.ensure_connection().await?;
+        if connected {
+            return Ok(());
+        }
+
+        if previous_asset_ids.is_empty() {
+            return self.send_subscription().await;
+        }
+
+        let removed_asset_ids = diff_ids(&previous_asset_ids, &next_asset_ids);
+        if !removed_asset_ids.is_empty() {
+            let message = self.format_subscription_operation("unsubscribe", removed_asset_ids);
+            self.send_raw_message(message).await?;
+        }
+
+        let added_asset_ids = diff_ids(&next_asset_ids, &previous_asset_ids);
+        if !added_asset_ids.is_empty() {
+            let message = self.format_subscription_operation("subscribe", added_asset_ids);
+            self.send_raw_message(message).await?;
+        }
+
+        Ok(())
     }
 
     /// Read the next market channel event, reconnecting transparently when
@@ -443,6 +570,17 @@ impl WssUserClient {
         }))
     }
 
+    fn format_subscription_operation(&self, operation: &str, markets: Vec<String>) -> Option<Value> {
+        if markets.is_empty() {
+            return None;
+        }
+
+        Some(json!({
+            "markets": markets,
+            "operation": operation,
+        }))
+    }
+
     async fn send_subscription(&mut self) -> Result<()> {
         if let Some(message) = self.format_subscription() {
             self.send_raw_message(message).await
@@ -509,19 +647,41 @@ impl WssUserClient {
         Duration::from_millis(millis.min(MAX_RECONNECT_DELAY.as_millis()) as u64)
     }
 
-    async fn ensure_connection(&mut self) -> Result<()> {
+    async fn ensure_connection(&mut self) -> Result<bool> {
         if self.connection.is_none() {
             self.connect().await?;
             self.send_subscription().await?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Subscribe to the user channel for the provided market IDs.
     pub async fn subscribe(&mut self, market_ids: Vec<String>) -> Result<()> {
-        self.subscribed_markets = market_ids;
-        self.ensure_connection().await?;
-        self.send_subscription().await
+        let next_market_ids = dedupe_preserve_order(market_ids);
+        let previous_market_ids = self.subscribed_markets.clone();
+        self.subscribed_markets = next_market_ids.clone();
+
+        let connected = self.ensure_connection().await?;
+        if connected {
+            return Ok(());
+        }
+
+        if previous_market_ids.is_empty() {
+            return self.send_subscription().await;
+        }
+
+        let removed_markets = diff_ids(&previous_market_ids, &next_market_ids);
+        if let Some(message) = self.format_subscription_operation("unsubscribe", removed_markets) {
+            self.send_raw_message(message).await?;
+        }
+
+        let added_markets = diff_ids(&next_market_ids, &previous_market_ids);
+        if let Some(message) = self.format_subscription_operation("subscribe", added_markets) {
+            self.send_raw_message(message).await?;
+        }
+
+        Ok(())
     }
 
     /// Read the next user channel event, reconnecting transparently when the
@@ -655,11 +815,58 @@ fn parse_market_event_value(value: &Value) -> Result<WssMarketEvent> {
                 })?;
             Ok(WssMarketEvent::LastTrade(parsed))
         }
+        "best_bid_ask" => {
+            let parsed =
+                serde_json::from_value::<BestBidAskMessage>(value.clone()).map_err(|err| {
+                    PolyError::parse(
+                        format!("Failed to parse best_bid_ask: {}", err),
+                        Some(Box::new(err)),
+                    )
+                })?;
+            Ok(WssMarketEvent::BestBidAsk(parsed))
+        }
+        "new_market" => {
+            let parsed =
+                serde_json::from_value::<NewMarketMessage>(value.clone()).map_err(|err| {
+                    PolyError::parse(
+                        format!("Failed to parse new_market: {}", err),
+                        Some(Box::new(err)),
+                    )
+                })?;
+            Ok(WssMarketEvent::NewMarket(parsed))
+        }
+        "market_resolved" => {
+            let parsed =
+                serde_json::from_value::<MarketResolvedMessage>(value.clone()).map_err(|err| {
+                    PolyError::parse(
+                        format!("Failed to parse market_resolved: {}", err),
+                        Some(Box::new(err)),
+                    )
+                })?;
+            Ok(WssMarketEvent::MarketResolved(parsed))
+        }
         other => Err(PolyError::parse(
             format!("Unknown market event_type: {}", other),
             None,
         )),
     }
+}
+
+fn dedupe_preserve_order(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
+fn diff_ids(next: &[String], previous: &[String]) -> Vec<String> {
+    let previous_set = previous.iter().cloned().collect::<HashSet<_>>();
+    next.iter()
+        .filter(|value| !previous_set.contains(*value))
+        .cloned()
+        .collect()
 }
 
 fn parse_user_events(text: &str) -> Result<Vec<WssUserEvent>> {
@@ -707,5 +914,305 @@ fn parse_user_event_value(value: &Value) -> Result<WssUserEvent> {
             format!("Unknown user event_type: {}", other),
             None,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+    use tokio::time::{Duration, timeout};
+    use tokio_tungstenite::accept_async;
+
+    async fn spawn_text_capture_server() -> Result<(String, mpsc::UnboundedReceiver<String>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|err| PolyError::stream(
+                format!("failed to bind test websocket listener: {err}"),
+                crate::errors::StreamErrorKind::ConnectionFailed,
+            ))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|err| PolyError::stream(
+                format!("failed to get local addr: {err}"),
+                crate::errors::StreamErrorKind::ConnectionFailed,
+            ))?;
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                if let Ok(mut websocket) = accept_async(stream).await {
+                    while let Some(message) = websocket.next().await {
+                        match message {
+                            Ok(Message::Text(text)) => {
+                                let _ = tx.send(text.to_string());
+                            }
+                            Ok(Message::Close(_)) => break,
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok((format!("ws://{}", addr), rx))
+    }
+
+    #[tokio::test]
+    async fn market_subscribe_sends_single_initial_payload_with_custom_feature() {
+        let (url, mut rx) = spawn_text_capture_server().await.expect("server should start");
+        let mut client = WssMarketClient::with_url(&url);
+
+        client
+            .subscribe(vec!["asset-a".to_string(), "asset-b".to_string()])
+            .await
+            .expect("subscribe should succeed");
+
+        let first = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected initial subscription message")
+            .expect("initial subscription should be captured");
+        let payload: Value = serde_json::from_str(&first).expect("subscription should be JSON");
+
+        assert_eq!(
+            payload,
+            json!({
+                "type": "market",
+                "assets_ids": ["asset-a", "asset-b"],
+                "custom_feature_enabled": true
+            })
+        );
+
+        assert!(
+            timeout(Duration::from_millis(250), rx.recv()).await.is_err(),
+            "fresh subscribe should not send a duplicate initial subscription"
+        );
+    }
+
+    #[tokio::test]
+    async fn market_resubscribe_sends_dynamic_subscribe_operation_for_added_assets() {
+        let (url, mut rx) = spawn_text_capture_server().await.expect("server should start");
+        let mut client = WssMarketClient::with_url(&url);
+
+        client
+            .subscribe(vec!["asset-a".to_string()])
+            .await
+            .expect("initial subscribe should succeed");
+        let _ = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected initial subscription message");
+        assert!(timeout(Duration::from_millis(250), rx.recv()).await.is_err());
+
+        client
+            .subscribe(vec!["asset-a".to_string(), "asset-b".to_string()])
+            .await
+            .expect("resubscribe should succeed");
+
+        let second = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected subscribe operation message")
+            .expect("dynamic subscribe message should be captured");
+        let payload: Value = serde_json::from_str(&second).expect("dynamic message should be JSON");
+
+        assert_eq!(
+            payload,
+            json!({
+                "assets_ids": ["asset-b"],
+                "operation": "subscribe",
+                "custom_feature_enabled": true
+            })
+        );
+
+        assert!(
+            timeout(Duration::from_millis(250), rx.recv()).await.is_err(),
+            "resubscribe should emit only one delta message for added assets"
+        );
+    }
+
+    #[tokio::test]
+    async fn market_resubscribe_sends_dynamic_unsubscribe_operation_for_removed_assets() {
+        let (url, mut rx) = spawn_text_capture_server().await.expect("server should start");
+        let mut client = WssMarketClient::with_url(&url);
+
+        client
+            .subscribe(vec!["asset-a".to_string(), "asset-b".to_string()])
+            .await
+            .expect("initial subscribe should succeed");
+        let _ = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected initial subscription message");
+        assert!(timeout(Duration::from_millis(250), rx.recv()).await.is_err());
+
+        client
+            .subscribe(vec!["asset-b".to_string()])
+            .await
+            .expect("resubscribe should succeed");
+
+        let second = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected unsubscribe operation message")
+            .expect("dynamic unsubscribe message should be captured");
+        let payload: Value = serde_json::from_str(&second).expect("dynamic message should be JSON");
+
+        assert_eq!(
+            payload,
+            json!({
+                "assets_ids": ["asset-a"],
+                "operation": "unsubscribe"
+            })
+        );
+
+        assert!(
+            timeout(Duration::from_millis(250), rx.recv()).await.is_err(),
+            "unsubscribe should emit only one delta message for removed assets"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_subscribe_sends_single_initial_payload_without_duplicate() {
+        let (url, mut rx) = spawn_text_capture_server().await.expect("server should start");
+        let auth = ApiCredentials {
+            api_key: "api-key".to_string(),
+            secret: "secret".to_string(),
+            passphrase: "passphrase".to_string(),
+        };
+        let mut client = WssUserClient::with_url(&url, auth.clone());
+
+        client
+            .subscribe(vec!["market-a".to_string()])
+            .await
+            .expect("user subscribe should succeed");
+
+        let first = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected initial user subscription message")
+            .expect("initial user subscription should be captured");
+        let payload: Value = serde_json::from_str(&first).expect("subscription should be JSON");
+
+        assert_eq!(
+            payload,
+            json!({
+                "type": "user",
+                "auth": {
+                    "apiKey": auth.api_key,
+                    "secret": auth.secret,
+                    "passphrase": auth.passphrase,
+                },
+                "markets": ["market-a"]
+            })
+        );
+
+        assert!(
+            timeout(Duration::from_millis(250), rx.recv()).await.is_err(),
+            "fresh user subscribe should not send a duplicate initial subscription"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_resubscribe_sends_dynamic_market_subscribe_operation() {
+        let (url, mut rx) = spawn_text_capture_server().await.expect("server should start");
+        let auth = ApiCredentials {
+            api_key: "api-key".to_string(),
+            secret: "secret".to_string(),
+            passphrase: "passphrase".to_string(),
+        };
+        let mut client = WssUserClient::with_url(&url, auth);
+
+        client
+            .subscribe(vec!["market-a".to_string()])
+            .await
+            .expect("initial user subscribe should succeed");
+        let _ = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected initial user subscription");
+        assert!(timeout(Duration::from_millis(250), rx.recv()).await.is_err());
+
+        client
+            .subscribe(vec!["market-a".to_string(), "market-b".to_string()])
+            .await
+            .expect("user resubscribe should succeed");
+
+        let second = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected dynamic user subscribe operation")
+            .expect("dynamic user subscribe should be captured");
+        let payload: Value = serde_json::from_str(&second).expect("dynamic user message should be JSON");
+
+        assert_eq!(
+            payload,
+            json!({
+                "markets": ["market-b"],
+                "operation": "subscribe"
+            })
+        );
+
+        assert!(
+            timeout(Duration::from_millis(250), rx.recv()).await.is_err(),
+            "user resubscribe should emit only one delta message"
+        );
+    }
+
+    #[test]
+    fn parse_market_events_supports_best_bid_ask_and_market_lifecycle_messages() {
+        let text = json!([
+            {
+                "event_type": "best_bid_ask",
+                "market": "market-1",
+                "asset_id": "asset-1",
+                "best_bid": "0.73",
+                "best_ask": "0.77",
+                "spread": "0.04",
+                "timestamp": "1766789469958"
+            },
+            {
+                "event_type": "new_market",
+                "id": "1031769",
+                "question": "Will NVIDIA (NVDA) close above $240 end of January?",
+                "market": "0x311d0c4b",
+                "slug": "nvda-above-240-on-january-30-2026",
+                "description": "This market will resolve to Yes if the official closing price...",
+                "assets_ids": ["asset-yes", "asset-no"],
+                "outcomes": ["Yes", "No"],
+                "event_message": {
+                    "id": "125819",
+                    "ticker": "nvda-above-in-january-2026",
+                    "slug": "nvda-above-in-january-2026",
+                    "title": "Will NVIDIA (NVDA) close above ___ end of January?"
+                },
+                "timestamp": "1766790415550"
+            },
+            {
+                "event_type": "market_resolved",
+                "id": "1031769",
+                "question": "Will NVIDIA (NVDA) close above $240 end of January?",
+                "market": "0x311d0c4b",
+                "slug": "nvda-above-240-on-january-30-2026",
+                "description": "This market will resolve to Yes if the official closing price...",
+                "assets_ids": ["asset-yes", "asset-no"],
+                "outcomes": ["Yes", "No"],
+                "winning_asset_id": "asset-yes",
+                "winning_outcome": "Yes",
+                "event_message": {
+                    "id": "125819",
+                    "ticker": "nvda-above-in-january-2026"
+                },
+                "timestamp": "1766790415550"
+            }
+        ])
+        .to_string();
+
+        let events = parse_market_events(&text).expect("official market channel events should parse");
+
+        let rendered = events
+            .iter()
+            .map(|event| format!("{event:?}"))
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 3);
+        assert!(rendered[0].contains("BestBidAsk"));
+        assert!(rendered[1].contains("NewMarket"));
+        assert!(rendered[2].contains("MarketResolved"));
     }
 }

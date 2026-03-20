@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
 
     println!("Cancelling order {order_id}...");
     let response = client.cancel(&order_id).await?;
-    println!("Cancel response: {response:#}");
+    println!("Cancel response: {response:#?}");
 
     Ok(())
 }
